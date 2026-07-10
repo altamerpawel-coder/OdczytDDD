@@ -35,7 +35,12 @@ public final class ShareFileProvider extends ContentProvider {
 
     @Override
     public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
-        File file = resolve(uri);
+        File file;
+        try {
+            file = resolve(uri);
+        } catch (FileNotFoundException e) {
+            return null;
+        }
         String[] columns = projection != null ? projection
                 : new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE};
         MatrixCursor cursor = new MatrixCursor(columns, 1);
