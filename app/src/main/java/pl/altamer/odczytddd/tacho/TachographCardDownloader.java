@@ -75,6 +75,8 @@ public final class TachographCardDownloader {
     private final CcidSession session;
     private final StringBuilder log = new StringBuilder();
     private int apduCount;
+    private boolean readProbed;
+    private int currentFid;
 
     public TachographCardDownloader(CcidSession session) {
         this.session = session;
@@ -195,6 +197,7 @@ public final class TachographCardDownloader {
     }
 
     private boolean selectFile(int fid) throws IOException {
+        currentFid = fid;
         byte[] apdu = new byte[]{
                 0x00, (byte) 0xA4, 0x02, 0x0C, 0x02,
                 (byte) (fid >>> 8), (byte) fid
@@ -243,6 +246,10 @@ public final class TachographCardDownloader {
                 break;
             }
 
+            if (offset == 0 && !readProbed) {
+                readProbed = true;
+                probeReadBinary();
+            }
             throw new IOException("Błąd READ BINARY przy pozycji " + offset
                     + ": " + response.statusHex());
         }
@@ -262,6 +269,43 @@ public final class TachographCardDownloader {
                 (byte) le
         };
         return transmitQuiet(apdu); // READ BINARY nie zaśmieca logu (dużo chunków)
+    }
+
+    /**
+     * Sonda: gdy READ BINARY padnie na pierwszym bajcie (np. 6700), sprawdź
+     * jaką długość odczytu akceptuje karta oraz jaki jest realny rozmiar pliku.
+     * Wynik w logu pozwoli ustalić poprawny sposób odczytu.
+     */
+    private void probeReadBinary() {
+        logLine("   === SONDA READ BINARY (plik " + hexFid(currentFid) + ") ===");
+        int[] les = {0x00, 0x01, 0x04, 0x08, 0x10, 0x18, 0x1A, 0x20, 0x40, 0x80};
+        for (int le : les) {
+            try {
+                logLine("   [read Le=" + le + " (0x" + String.format("%02X", le) + ")]");
+                ApduResponse r = transmit(new byte[]{0x00, (byte) 0xB0, 0x00, 0x00, (byte) le});
+                if (r.isSuccess()) {
+                    logLine("   >>> DZIALA Le=" + le + " -> odczytano " + r.data().length + " B <<<");
+                }
+            } catch (Exception e) {
+                logLine("   [read Le=" + le + "] blad: " + safe(e.getMessage()));
+            }
+        }
+        // Zapytaj kartę o rozmiar/strukturę pliku (FCP / FCI).
+        try {
+            logLine("   [SELECT P2=04 -> FCP (rozmiar pliku)]");
+            transmit(new byte[]{0x00, (byte) 0xA4, 0x02, 0x04, 0x02,
+                    (byte) (currentFid >>> 8), (byte) currentFid});
+        } catch (Exception e) {
+            logLine("   [SELECT P2=04] blad: " + safe(e.getMessage()));
+        }
+        try {
+            logLine("   [SELECT P2=00 -> FCI]");
+            transmit(new byte[]{0x00, (byte) 0xA4, 0x02, 0x00, 0x02,
+                    (byte) (currentFid >>> 8), (byte) currentFid});
+        } catch (Exception e) {
+            logLine("   [SELECT P2=00] blad: " + safe(e.getMessage()));
+        }
+        logLine("   === koniec sondy READ ===");
     }
 
     private int performHashWithFallback(AppGeneration generation) throws IOException {
