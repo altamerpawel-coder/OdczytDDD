@@ -215,10 +215,12 @@ public final class TachographCardDownloader {
     private byte[] readSelectedFile() throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         int offset = 0;
-        final int preferredChunk = 0xFE;
+        final int fullChunk = 256; // Le=0x00: karta odpowie 6Cxx z dokładną długością
 
         while (offset <= 0x7FFF) {
-            ApduResponse response = readBinary(offset, preferredChunk);
+            // Pytamy z Le=0x00. Restrykcyjna karta odpowiada 6Cxx z dokładną
+            // liczbą dostępnych bajtów, którą następnie pobieramy precyzyjnie.
+            ApduResponse response = readBinary(offset, fullChunk);
 
             if (response.sw1() == 0x6C) {
                 int exact = response.sw2() == 0 ? 256 : response.sw2();
@@ -229,8 +231,8 @@ public final class TachographCardDownloader {
                 byte[] data = response.data();
                 out.write(data, 0, data.length);
                 offset += data.length;
-                if (data.length < preferredChunk) {
-                    break;
+                if (data.length < fullChunk) {
+                    break; // ostatni (niepełny) fragment pliku
                 }
                 continue;
             }
@@ -241,12 +243,13 @@ public final class TachographCardDownloader {
                 break;
             }
 
-            if ((response.statusWord() == 0x6B00 || response.statusWord() == 0x6A86)
-                    && offset > 0) {
+            // Po odczytaniu części pliku każdy błąd traktujemy jako koniec pliku.
+            if (offset > 0) {
                 break;
             }
 
-            if (offset == 0 && !readProbed) {
+            // Pozycja 0 = pierwszy odczyt naprawdę się nie udał — zbierz diagnostykę.
+            if (!readProbed) {
                 readProbed = true;
                 probeReadBinary();
             }
@@ -333,27 +336,33 @@ public final class TachographCardDownloader {
 
     private byte[] computeDigitalSignature(AppGeneration generation, int hashAlgorithm, int fid)
             throws IOException {
-        logLine("   PSO: COMPUTE DIGITAL SIGNATURE (Le=00)");
-        ApduResponse response = transmit(new byte[]{0x00, 0x2A, (byte) 0x9E, (byte) 0x9A, 0x00});
-        if (response.sw1() == 0x6C) {
-            int le = response.sw2();
-            logLine("   -> 6C" + String.format("%02X", le) + ", ponawiam z Le=" + le);
+        // Ta karta wymaga DOKŁADNEJ długości Le (jak przy READ BINARY) i nie
+        // negocjuje przez 6Cxx dla PSO. Podpis ECC Gen2 ma 128/96/64 bajty.
+        // Próbujemy malejąco — pierwsza długość z 9000 to prawidłowy podpis
+        // (Le za duże => 6700, więc pierwsze 9000 przy schodzeniu = dokładny rozmiar).
+        int[] candidateLe = {0x80, 0x60, 0x40}; // 128, 96, 64
+        ApduResponse response = null;
+        for (int le : candidateLe) {
+            logLine("   PSO: COMPUTE DIGITAL SIGNATURE (Le=" + le + ")");
             response = transmit(new byte[]{0x00, 0x2A, (byte) 0x9E, (byte) 0x9A, (byte) le});
-        }
-        if (!response.isSuccess()) {
-            // Sonda: sprawdź co odblokowuje podpis na tej karcie Gen2.
-            if (generation == AppGeneration.GEN2) {
-                probeGen2Signature();
+            if (response.sw1() == 0x6C) {
+                int exact = response.sw2() == 0 ? 256 : response.sw2();
+                logLine("   -> 6C" + String.format("%02X", response.sw2()) + ", ponawiam z Le=" + exact);
+                response = transmit(new byte[]{0x00, 0x2A, (byte) 0x9E, (byte) 0x9A, (byte) exact});
             }
-            throw new IOException("Błąd podpisu cyfrowego (" + generation.label
-                    + ", plik " + hexFid(fid) + ", hash=" + hashAlgorithm
-                    + "): " + response.statusHex());
+            if (response.isSuccess() && response.data().length > 0) {
+                logLine("   >>> PODPIS OK, Le=" + le + " -> " + response.data().length + " B <<<");
+                return response.data();
+            }
         }
-        byte[] signature = response.data();
-        if (signature.length == 0) {
-            throw new IOException("Karta zwróciła pusty podpis cyfrowy");
+        // Żadna długość nie zadziałała — zbierz diagnostykę i przerwij.
+        if (generation == AppGeneration.GEN2) {
+            probeGen2Signature();
         }
-        return signature;
+        String sw = response != null ? response.statusHex() : "----";
+        throw new IOException("Błąd podpisu cyfrowego (" + generation.label
+                + ", plik " + hexFid(fid) + ", hash=" + hashAlgorithm
+                + "): " + sw);
     }
 
     /**
