@@ -230,13 +230,60 @@ public final class MainActivity extends Activity {
         if (!dir.exists() && !dir.mkdirs()) {
             throw new Exception("Nie można utworzyć katalogu na pliki DDD");
         }
-        String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
-        File file = new File(dir, "KARTA_" + stamp + ".DDD");
+        File file = new File(dir, buildDddFileName(data));
         try (FileOutputStream out = new FileOutputStream(file)) {
             out.write(data);
             out.flush();
         }
         return file;
+    }
+
+    /**
+     * Standardowa nazwa pliku pobrania karty kierowcy:
+     * C_RRRRMMDD_GGMM_&lt;inicjał imienia&gt;_&lt;Nazwisko&gt;_&lt;numer karty 14 znaków&gt;.DDD
+     * Imię, nazwisko i numer pobierane z EF Identification (0520). W razie
+     * jakiegokolwiek problemu — nazwa awaryjna z datą i godziną.
+     */
+    private String buildDddFileName(byte[] ddd) {
+        String dateTime = new SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(new Date());
+        try {
+            byte[] id = findDddBlock(ddd, 0x0520);
+            if (id != null && id.length >= 137) {
+                String cardNumber = new String(id, 1, 16, "ISO-8859-1").trim();
+                String surname = new String(id, 66, 35, "ISO-8859-1").trim();
+                String firstNames = new String(id, 102, 35, "ISO-8859-1").trim();
+                String card14 = cardNumber.length() >= 14 ? cardNumber.substring(0, 14) : cardNumber;
+                card14 = card14.replaceAll("[^A-Za-z0-9]", "");
+                String sur = surname.replaceAll("[^A-Za-z0-9]", "");
+                String ini = firstNames.isEmpty() ? "X"
+                        : firstNames.substring(0, 1).toUpperCase(Locale.ROOT);
+                if (!sur.isEmpty() && !card14.isEmpty()) {
+                    return "C_" + dateTime + "_" + ini + "_" + sur + "_" + card14 + ".DDD";
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "KARTA_" + dateTime + ".DDD";
+    }
+
+    /** Wartość pierwszego bloku DANE (typ 0) o danym FID (format DDD: FID2 + typ1 + długość2 + wartość). */
+    private static byte[] findDddBlock(byte[] d, int wantedFid) {
+        int p = 0;
+        while (p + 5 <= d.length) {
+            int fid = ((d[p] & 0xFF) << 8) | (d[p + 1] & 0xFF);
+            int type = d[p + 2] & 0xFF;
+            int len = ((d[p + 3] & 0xFF) << 8) | (d[p + 4] & 0xFF);
+            if (p + 5 + len > d.length) {
+                break;
+            }
+            if (fid == wantedFid && type == 0) {
+                byte[] value = new byte[len];
+                System.arraycopy(d, p + 5, value, 0, len);
+                return value;
+            }
+            p += 5 + len;
+        }
+        return null;
     }
 
     private void shareLatestFile() {
