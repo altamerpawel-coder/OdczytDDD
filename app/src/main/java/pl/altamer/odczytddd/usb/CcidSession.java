@@ -78,6 +78,26 @@ public final class CcidSession implements Closeable {
         }
 
         int status = frame[7] & 0xFF;
+
+        // bmCommandStatus (bity 7:6 bajtu status): 0 = OK, 1 = błąd (bError),
+        // 2 (0x80) = karta prosi o więcej czasu (WTX — np. liczenie hasha dużego
+        // pliku aktywności kierowcy). Wtedy czekamy na kolejną ramkę zamiast
+        // przerywać. Poprzednio każdy status != 0 był traktowany jako błąd.
+        int guard = 0;
+        while ((status & 0xC0) == 0x80) {
+            if (++guard > 120) {
+                throw new IOException("Czytnik zbyt długo przetwarza polecenie karty");
+            }
+            frame = readFrame();
+            if ((frame[0] & 0xFF) != RDR_TO_PC_DATA_BLOCK) {
+                throw new IOException(String.format("Nieoczekiwana odpowiedź CCID: 0x%02X", frame[0] & 0xFF));
+            }
+            if ((frame[6] & 0xFF) != seq) {
+                throw new IOException("Niezgodny numer sekwencji odpowiedzi czytnika");
+            }
+            status = frame[7] & 0xFF;
+        }
+
         int commandStatus = status & 0xC0;
         int iccStatus = status & 0x03;
         if (commandStatus != 0) {
