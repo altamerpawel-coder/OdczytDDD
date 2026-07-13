@@ -21,7 +21,9 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -57,7 +59,6 @@ public final class MainActivity extends Activity {
     private TextView statusText;
     private TextView detailText;
     private Button readButton;
-    private Button resendButton;
     private File latestFile;
     private boolean busy;
 
@@ -115,7 +116,6 @@ public final class MainActivity extends Activity {
         statusText = null;
         detailText = null;
         readButton = null;
-        resendButton = null;
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -182,9 +182,27 @@ public final class MainActivity extends Activity {
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT));
 
+        FrameLayout header = new FrameLayout(this);
         TextView title = text("ODCZYT KARTY KIEROWCY", 24, Typeface.BOLD, BLUE);
         title.setGravity(Gravity.CENTER);
-        root.addView(title, matchWrap(dp(8)));
+        FrameLayout.LayoutParams titleParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        titleParams.gravity = Gravity.CENTER;
+        header.addView(title, titleParams);
+
+        Button menu = new Button(this);
+        menu.setText("⋮");
+        menu.setTextSize(26);
+        menu.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        menu.setTextColor(BLUE);
+        menu.setBackground(rounded(Color.WHITE, dp(12)));
+        menu.setPadding(dp(6), dp(2), dp(6), dp(2));
+        FrameLayout.LayoutParams menuParams = new FrameLayout.LayoutParams(dp(52), dp(52));
+        menuParams.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
+        menu.setOnClickListener(this::showOverflowMenu);
+        header.addView(menu, menuParams);
+        root.addView(header, matchWrap(dp(10)));
 
         TextView steps = text(
                 "1. Podłącz czytnik USB-C\n\n"
@@ -204,15 +222,6 @@ public final class MainActivity extends Activity {
         target.setBackground(rounded(Color.rgb(233, 240, 247), dp(14)));
         root.addView(target, matchWrap(dp(6)));
 
-        Button change = new Button(this);
-        change.setText("Zmień numer");
-        change.setTextSize(16);
-        change.setAllCaps(false);
-        change.setTextColor(BLUE);
-        change.setBackgroundColor(Color.TRANSPARENT);
-        change.setOnClickListener(v -> setContentView(buildSetupUi()));
-        root.addView(change, matchWrap(dp(10)));
-
         statusText = text("Sprawdzam czytnik…", 22, Typeface.BOLD, TEXT);
         statusText.setGravity(Gravity.CENTER);
         root.addView(statusText, matchWrap(dp(6)));
@@ -223,21 +232,19 @@ public final class MainActivity extends Activity {
 
         readButton = bigButton("ODCZYTAJ I WYŚLIJ", BLUE);
         readButton.setOnClickListener(v -> onReadClicked());
-        root.addView(readButton, fixedHeight(dp(88), dp(12)));
-
-        resendButton = bigButton("WYŚLIJ PONOWNIE", GREEN);
-        resendButton.setEnabled(false);
-        resendButton.setAlpha(0.45f);
-        resendButton.setOnClickListener(v -> {
-            if (latestFile != null && latestFile.isFile()) {
-                sendToWhatsApp(latestFile);
-            } else {
-                Toast.makeText(this, "Najpierw odczytaj kartę", Toast.LENGTH_LONG).show();
-            }
-        });
-        root.addView(resendButton, fixedHeight(dp(72), dp(4)));
+        root.addView(readButton, fixedHeight(dp(88), dp(8)));
 
         return scroll;
+    }
+
+    private void showOverflowMenu(View anchor) {
+        PopupMenu popup = new PopupMenu(this, anchor);
+        popup.getMenu().add("Zmień numer WhatsApp");
+        popup.setOnMenuItemClickListener(item -> {
+            setContentView(buildSetupUi());
+            return true;
+        });
+        popup.show();
     }
 
     private void onReadClicked() {
@@ -251,10 +258,6 @@ public final class MainActivity extends Activity {
         }
 
         latestFile = null;
-        if (resendButton != null) {
-            resendButton.setEnabled(false);
-            resendButton.setAlpha(0.45f);
-        }
 
         if (!usbManager.hasPermission(device)) {
             setBusy(true);
@@ -300,10 +303,6 @@ public final class MainActivity extends Activity {
             boolean lastDownloadUpdated) {
         latestFile = file;
         setBusy(false);
-        if (resendButton != null) {
-            resendButton.setEnabled(true);
-            resendButton.setAlpha(1f);
-        }
 
         String gen = generationLabel(result.generations());
         if (lastDownloadUpdated) {
