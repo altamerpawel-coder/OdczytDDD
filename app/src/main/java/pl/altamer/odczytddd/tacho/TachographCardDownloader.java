@@ -9,26 +9,16 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Wersja DIAGNOSTYCZNA downloadera karty tachografu Gen1/Gen2.
+ * Downloader karty kierowcy tachografu (Gen1 + Gen2).
+ * Tworzy plik DDD jako ciąg obiektów TLV i po złożeniu pliku próbuje zapisać
+ * czas ostatniego pobrania w EF Card_Download (050E).
  *
- * Do zwykłej wersji dodano:
- *  - pełny log wymiany APDU (każda komenda + odpowiedź karty ze statusem SW),
- *  - sondę Gen2: gdy PSO: Compute Digital Signature zwróci błąd (np. 6700),
- *    aplikacja próbuje kilku wariantów sekwencji (MSE: SET DST, PSO bez Le itd.)
- *    i loguje odpowiedź karty na każdy z nich — to pokazuje, czego karta oczekuje.
- *
- * Log trafia:
- *  - do komunikatu wyjątku (widoczny na czerwonym ekranie błędu — zrób zrzut),
- *  - do pola statycznego {@link #LAST_APDU_LOG} (opcjonalnie do zapisania do pliku).
- *
- * Klasa jest samowystarczalna i ma to samo publiczne API co wersja produkcyjna,
- * więc można ją podmienić 1:1 w repozytorium i zbudować przez GitHub Actions.
+ * Uwzględnia specyfikę restrykcyjnych kart:
+ *  - READ BINARY z Le=0x00 (karta zwraca 6Cxx z dokładną długością, potem odczyt dokładny),
+ *  - PSO: Compute Digital Signature z dokładną długością podpisu (Gen1 RSA 128 B / Gen2 ECC 64 B),
+ *  - obsługę WTX (prośby czytnika o więcej czasu) realizuje warstwa {@link CcidSession}.
  */
 public final class TachographCardDownloader {
-
-    /** Pełny log ostatniego odczytu (ustawiany zawsze — także po sukcesie). */
-    public static volatile String LAST_APDU_LOG = "";
-
     private static final byte[] AID_GEN1 = hex("FF544143484F");
     private static final byte[] AID_GEN2 = hex("FF534D524454");
 
@@ -73,72 +63,48 @@ public final class TachographCardDownloader {
     };
 
     private final CcidSession session;
-    private final StringBuilder log = new StringBuilder();
-    private int apduCount;
-    private boolean readProbed;
-    private int currentFid;
 
     public TachographCardDownloader(CcidSession session) {
         this.session = session;
     }
 
     public DownloadResult download() throws IOException {
-        log.setLength(0);
-        apduCount = 0;
-        logLine("=== ODCZYT KARTY — LOG APDU ===");
-        try {
-            byte[] atr = session.powerOn();
-            logLine("ATR: " + hex(atr) + " (" + atr.length + " B)");
-            if (atr.length == 0) {
-                throw new IOException("Karta nie odpowiedziała po włączeniu");
-            }
-
-            DddWriter writer = new DddWriter();
-            List<AppGeneration> downloadedApps = new ArrayList<>();
-
-            appendUnsignedIfPresent(writer, FID_ICC, false);
-            appendUnsignedIfPresent(writer, FID_IC, false);
-
-            logLine("-- SELECT AID Gen1 --");
-            if (selectAid(AID_GEN1)) {
-                downloadApplication(writer, AppGeneration.GEN1, GEN1_FILES);
-                downloadedApps.add(AppGeneration.GEN1);
-            } else {
-                logLine("   Gen1 niedostępna");
-            }
-
-            logLine("-- SELECT AID Gen2 --");
-            if (selectAid(AID_GEN2)) {
-                downloadApplication(writer, AppGeneration.GEN2, GEN2_FILES);
-                downloadedApps.add(AppGeneration.GEN2);
-            } else {
-                logLine("   Gen2 niedostępna");
-            }
-
-            if (downloadedApps.isEmpty()) {
-                throw new IOException("Nie rozpoznano aplikacji karty tachografowej Gen1 ani Gen2");
-            }
-            if (writer.blockCount() < 4) {
-                throw new IOException("Odczyt karty jest niekompletny");
-            }
-
-            byte[] ddd = writer.toByteArray();
-            LAST_APDU_LOG = log.toString();
-            return new DownloadResult(ddd, downloadedApps, atr);
-        } catch (IOException e) {
-            // Dołącz log APDU do komunikatu, żeby był widoczny na ekranie błędu.
-            LAST_APDU_LOG = log.toString();
-            String trace = tail(log.toString(), 3500);
-            throw new IOException(safe(e.getMessage()) + "\n\n=== LOG APDU (ostatnie kroki) ===\n" + trace, e);
+        byte[] atr = session.powerOn();
+        if (atr.length == 0) {
+            throw new IOException("Karta nie odpowiedziała po włączeniu");
         }
+
+        DddWriter writer = new DddWriter();
+        List<AppGeneration> downloadedApps = new ArrayList<>();
+
+        appendUnsignedIfPresent(writer, FID_ICC, false);
+        appendUnsignedIfPresent(writer, FID_IC, false);
+
+        if (selectAid(AID_GEN1)) {
+            downloadApplication(writer, AppGeneration.GEN1, GEN1_FILES);
+            downloadedApps.add(AppGeneration.GEN1);
+        }
+
+        if (selectAid(AID_GEN2)) {
+            downloadApplication(writer, AppGeneration.GEN2, GEN2_FILES);
+            downloadedApps.add(AppGeneration.GEN2);
+        }
+
+        if (downloadedApps.isEmpty()) {
+            throw new IOException("Nie rozpoznano aplikacji karty tachografowej Gen1 ani Gen2");
+        }
+        if (writer.blockCount() < 4) {
+            throw new IOException("Odczyt karty jest niekompletny");
+        }
+
+        byte[] ddd = writer.toByteArray();
+        return new DownloadResult(ddd, downloadedApps, atr);
     }
 
     private void downloadApplication(DddWriter writer, AppGeneration generation, FileSpec[] files)
             throws IOException {
         for (FileSpec spec : files) {
-            logLine("SELECT " + hexFid(spec.fid) + (spec.signed ? " [podpisany]" : " [dane]"));
             if (!selectFile(spec.fid)) {
-                logLine("   brak pliku " + hexFid(spec.fid));
                 if (spec.required) {
                     throw new IOException("Brak wymaganego pliku karty " + hexFid(spec.fid)
                             + " w " + generation.label);
@@ -149,7 +115,6 @@ public final class TachographCardDownloader {
             if (spec.signed) {
                 int hashAlgorithm = performHashWithFallback(generation);
                 byte[] data = readSelectedFile();
-                logLine("   READ " + hexFid(spec.fid) + " -> " + data.length + " B");
                 if (data.length == 0 && spec.required) {
                     throw new IOException("Pusty wymagany plik " + hexFid(spec.fid));
                 }
@@ -158,24 +123,19 @@ public final class TachographCardDownloader {
                 writer.append(spec.fid, DddWriter.TYPE_SIGNATURE, signature);
             } else {
                 byte[] data = readSelectedFile();
-                logLine("   READ " + hexFid(spec.fid) + " -> " + data.length + " B");
                 writer.append(spec.fid, DddWriter.TYPE_DATA, data);
             }
         }
     }
 
     private void appendUnsignedIfPresent(DddWriter writer, int fid, boolean required) throws IOException {
-        logLine("SELECT " + hexFid(fid) + " [MF/dane]");
         if (!selectFile(fid)) {
-            logLine("   brak pliku " + hexFid(fid));
             if (required) {
                 throw new IOException("Brak wymaganego pliku " + hexFid(fid));
             }
             return;
         }
-        byte[] data = readSelectedFile();
-        logLine("   READ " + hexFid(fid) + " -> " + data.length + " B");
-        writer.append(fid, DddWriter.TYPE_DATA, data);
+        writer.append(fid, DddWriter.TYPE_DATA, readSelectedFile());
     }
 
     private boolean selectAid(byte[] aid) throws IOException {
@@ -197,7 +157,6 @@ public final class TachographCardDownloader {
     }
 
     private boolean selectFile(int fid) throws IOException {
-        currentFid = fid;
         byte[] apdu = new byte[]{
                 0x00, (byte) 0xA4, 0x02, 0x0C, 0x02,
                 (byte) (fid >>> 8), (byte) fid
@@ -248,11 +207,6 @@ public final class TachographCardDownloader {
                 break;
             }
 
-            // Pozycja 0 = pierwszy odczyt naprawdę się nie udał — zbierz diagnostykę.
-            if (!readProbed) {
-                readProbed = true;
-                probeReadBinary();
-            }
             throw new IOException("Błąd READ BINARY przy pozycji " + offset
                     + ": " + response.statusHex());
         }
@@ -271,44 +225,7 @@ public final class TachographCardDownloader {
                 (byte) offset,
                 (byte) le
         };
-        return transmitQuiet(apdu); // READ BINARY nie zaśmieca logu (dużo chunków)
-    }
-
-    /**
-     * Sonda: gdy READ BINARY padnie na pierwszym bajcie (np. 6700), sprawdź
-     * jaką długość odczytu akceptuje karta oraz jaki jest realny rozmiar pliku.
-     * Wynik w logu pozwoli ustalić poprawny sposób odczytu.
-     */
-    private void probeReadBinary() {
-        logLine("   === SONDA READ BINARY (plik " + hexFid(currentFid) + ") ===");
-        int[] les = {0x00, 0x01, 0x04, 0x08, 0x10, 0x18, 0x1A, 0x20, 0x40, 0x80};
-        for (int le : les) {
-            try {
-                logLine("   [read Le=" + le + " (0x" + String.format("%02X", le) + ")]");
-                ApduResponse r = transmit(new byte[]{0x00, (byte) 0xB0, 0x00, 0x00, (byte) le});
-                if (r.isSuccess()) {
-                    logLine("   >>> DZIALA Le=" + le + " -> odczytano " + r.data().length + " B <<<");
-                }
-            } catch (Exception e) {
-                logLine("   [read Le=" + le + "] blad: " + safe(e.getMessage()));
-            }
-        }
-        // Zapytaj kartę o rozmiar/strukturę pliku (FCP / FCI).
-        try {
-            logLine("   [SELECT P2=04 -> FCP (rozmiar pliku)]");
-            transmit(new byte[]{0x00, (byte) 0xA4, 0x02, 0x04, 0x02,
-                    (byte) (currentFid >>> 8), (byte) currentFid});
-        } catch (Exception e) {
-            logLine("   [SELECT P2=04] blad: " + safe(e.getMessage()));
-        }
-        try {
-            logLine("   [SELECT P2=00 -> FCI]");
-            transmit(new byte[]{0x00, (byte) 0xA4, 0x02, 0x00, 0x02,
-                    (byte) (currentFid >>> 8), (byte) currentFid});
-        } catch (Exception e) {
-            logLine("   [SELECT P2=00] blad: " + safe(e.getMessage()));
-        }
-        logLine("   === koniec sondy READ ===");
+        return transmit(apdu);
     }
 
     private int performHashWithFallback(AppGeneration generation) throws IOException {
@@ -318,7 +235,6 @@ public final class TachographCardDownloader {
 
         IOException last = null;
         for (int algorithm : candidates) {
-            logLine("   PERFORM HASH (P2=" + algorithm + ")");
             ApduResponse response = transmit(new byte[]{
                     (byte) 0x80, 0x2A, (byte) 0x90, (byte) algorithm
             });
@@ -336,84 +252,27 @@ public final class TachographCardDownloader {
 
     private byte[] computeDigitalSignature(AppGeneration generation, int hashAlgorithm, int fid)
             throws IOException {
-        // Ta karta wymaga DOKŁADNEJ długości Le (jak przy READ BINARY) i nie
-        // negocjuje przez 6Cxx dla PSO. Podpis ECC Gen2 ma 128/96/64 bajty.
-        // Próbujemy malejąco — pierwsza długość z 9000 to prawidłowy podpis
-        // (Le za duże => 6700, więc pierwsze 9000 przy schodzeniu = dokładny rozmiar).
+        // Karta wymaga dokładnej długości Le i nie negocjuje przez 6Cxx dla PSO.
+        // Podpis to Gen1 RSA (128 B) lub Gen2 ECC (64/96 B). Próbujemy malejąco —
+        // pierwsza długość z 9000 to dokładny rozmiar podpisu (za duże Le => 6700).
         int[] candidateLe = {0x80, 0x60, 0x40}; // 128, 96, 64
         ApduResponse response = null;
         for (int le : candidateLe) {
-            logLine("   PSO: COMPUTE DIGITAL SIGNATURE (Le=" + le + ")");
             response = transmit(new byte[]{0x00, 0x2A, (byte) 0x9E, (byte) 0x9A, (byte) le});
             if (response.sw1() == 0x6C) {
                 int exact = response.sw2() == 0 ? 256 : response.sw2();
-                logLine("   -> 6C" + String.format("%02X", response.sw2()) + ", ponawiam z Le=" + exact);
                 response = transmit(new byte[]{0x00, 0x2A, (byte) 0x9E, (byte) 0x9A, (byte) exact});
             }
             if (response.isSuccess() && response.data().length > 0) {
-                logLine("   >>> PODPIS OK, Le=" + le + " -> " + response.data().length + " B <<<");
                 return response.data();
             }
         }
-        // Żadna długość nie zadziałała — zbierz diagnostykę i przerwij.
-        if (generation == AppGeneration.GEN2) {
-            probeGen2Signature();
-        }
         String sw = response != null ? response.statusHex() : "----";
         throw new IOException("Błąd podpisu cyfrowego (" + generation.label
-                + ", plik " + hexFid(fid) + ", hash=" + hashAlgorithm
-                + "): " + sw);
+                + ", plik " + hexFid(fid) + ", hash=" + hashAlgorithm + "): " + sw);
     }
 
-    /**
-     * Próbuje po kolei kilku sekwencji, które MOGĄ być wymagane przez kartę Gen2
-     * przed policzeniem podpisu. Loguje odpowiedź karty na każdą — dzięki temu widać,
-     * którą sekwencję karta akceptuje (SW=9000 + dane = znaleziona poprawka).
-     */
-    private void probeGen2Signature() {
-        logLine("   === SONDA Gen2: szukam poprawnej sekwencji podpisu ===");
-        byte[][] probes = new byte[][]{
-                // PSO bez pola Le (case 1) — karta może odpowiedzieć 61xx (dane dostępne).
-                hex("002A9E9A"),
-                // MSE: SET DST — sam klucz (tag 84): 00 22 41 B6 03 84 01 01
-                hex("002241B603840101"),
-                // MSE: SET DST — sam algorytm (tag 80): 00 22 41 B6 03 80 01 01
-                hex("002241B603800101"),
-                // MSE: SET DST — algorytm + klucz: 00 22 41 B6 06 80 01 01 84 01 01
-                hex("002241B606800101840101"),
-                // MSE: SET DST z referencją klucza podpisu karty = 0x00: 00 22 41 B6 03 84 01 00
-                hex("002241B603840100")
-        };
-        String[] labels = {
-                "PSO bez Le (case 1)",
-                "MSE:SET DST key=01, potem PSO",
-                "MSE:SET DST algo=01, potem PSO",
-                "MSE:SET DST algo=01+key=01, potem PSO",
-                "MSE:SET DST key=00, potem PSO"
-        };
-        for (int i = 0; i < probes.length; i++) {
-            try {
-                logLine("   [sonda] " + labels[i]);
-                ApduResponse r1 = transmit(probes[i]);
-                // Jeśli to była komenda MSE (INS 0x22), po niej spróbuj PSO.
-                if (probes[i].length >= 2 && (probes[i][1] & 0xFF) == 0x22 && r1.isSuccess()) {
-                    ApduResponse r2 = transmit(new byte[]{0x00, 0x2A, (byte) 0x9E, (byte) 0x9A, 0x00});
-                    if (r2.sw1() == 0x6C) {
-                        r2 = transmit(new byte[]{0x00, 0x2A, (byte) 0x9E, (byte) 0x9A, (byte) r2.sw2()});
-                    }
-                    if (r2.isSuccess()) {
-                        logLine("   >>> SUKCES tą sekwencją! podpis=" + r2.data().length + " B <<<");
-                    }
-                } else if (r1.sw1() == 0x61) {
-                    logLine("   (karta zgłasza 61" + String.format("%02X", r1.sw2()) + " — dane dostępne)");
-                }
-            } catch (Exception e) {
-                logLine("   [sonda] błąd: " + safe(e.getMessage()));
-            }
-        }
-        logLine("   === koniec sondy ===");
-    }
-
+    /** Wywołaj dopiero po trwałym zapisaniu pliku DDD. */
     public boolean markDownloadCompleted(List<AppGeneration> apps) {
         long epochSeconds = System.currentTimeMillis() / 1000L;
         byte[] time = new byte[]{
@@ -447,23 +306,8 @@ public final class TachographCardDownloader {
     }
 
     private ApduResponse transmit(byte[] apdu) throws IOException {
-        return transmit(apdu, true);
-    }
-
-    private ApduResponse transmitQuiet(byte[] apdu) throws IOException {
-        return transmit(apdu, false);
-    }
-
-    private ApduResponse transmit(byte[] apdu, boolean verbose) throws IOException {
-        apduCount++;
-        if (verbose) {
-            logLine("> " + hex(apdu));
-        }
         ApduResponse first = new ApduResponse(session.transmitApdu(apdu));
         if (first.sw1() != 0x61) {
-            if (verbose) {
-                logResponse(first);
-            }
             return first;
         }
 
@@ -483,36 +327,7 @@ public final class TachographCardDownloader {
         byte[] raw = Arrays.copyOf(data, data.length + 2);
         raw[raw.length - 2] = (byte) current.sw1();
         raw[raw.length - 1] = (byte) current.sw2();
-        ApduResponse joined = new ApduResponse(raw);
-        if (verbose) {
-            logResponse(joined);
-        }
-        return joined;
-    }
-
-    private void logResponse(ApduResponse r) {
-        byte[] d = r.data();
-        String dataHex = d.length == 0 ? "" : (" data[" + d.length + "]=" + hex(preview(d, 24)));
-        logLine("< SW=" + r.statusHex() + dataHex);
-    }
-
-    private void logLine(String s) {
-        log.append(s).append('\n');
-    }
-
-    private static byte[] preview(byte[] b, int max) {
-        return b.length <= max ? b : Arrays.copyOf(b, max);
-    }
-
-    private static String tail(String s, int max) {
-        if (s.length() <= max) {
-            return s;
-        }
-        return "…(początek logu pominięty)…\n" + s.substring(s.length() - max);
-    }
-
-    private static String safe(String s) {
-        return s == null ? "(bez opisu)" : s;
+        return new ApduResponse(raw);
     }
 
     private static FileSpec signed(int fid, boolean required) {
@@ -525,14 +340,6 @@ public final class TachographCardDownloader {
 
     private static String hexFid(int fid) {
         return String.format("%04X", fid & 0xFFFF);
-    }
-
-    private static String hex(byte[] data) {
-        StringBuilder sb = new StringBuilder(data.length * 2);
-        for (byte b : data) {
-            sb.append(String.format("%02X", b & 0xFF));
-        }
-        return sb.toString();
     }
 
     private static byte[] hex(String text) {
