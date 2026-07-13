@@ -60,6 +60,7 @@ public final class MainActivity extends Activity {
     private Button readButton;
     private File latestFile;
     private boolean busy;
+    private boolean awaitingReturn;
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override
@@ -103,6 +104,16 @@ public final class MainActivity extends Activity {
         }
         executor.shutdownNow();
         super.onDestroy();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Powrót do aplikacji po otwarciu WhatsAppa — pokaż potwierdzenie.
+        if (awaitingReturn && statusText != null) {
+            awaitingReturn = false;
+            showStatus("GOTOWE ✓", "Plik DDD wysłany.\nMożesz odczytać kolejną kartę.", GREEN);
+        }
     }
 
     private String whatsappNumber() {
@@ -317,6 +328,7 @@ public final class MainActivity extends Activity {
     }
 
     private void sendToWhatsApp(File file) {
+        awaitingReturn = true; // po powrocie z WhatsAppa pokażemy "GOTOWE"
         Uri uri = ShareFileProvider.uriForFile(getPackageName() + ".files", file);
         Intent base = new Intent(Intent.ACTION_SEND);
         base.setType("application/octet-stream");
