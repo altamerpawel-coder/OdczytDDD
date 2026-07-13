@@ -135,7 +135,7 @@ public final class MainActivity extends Activity {
 
         TextView info = text(
                 "Podaj numer WhatsApp, na który mają trafiać odczytane pliki karty."
-                        + "\n\nWpisz z numerem kierunkowym, np. +48 691 323 618.",
+                        + "\n\nWpisz z numerem kierunkowym, np. +48 123 456 789.",
                 18, Typeface.NORMAL, TEXT);
         info.setPadding(dp(18), dp(18), dp(18), dp(18));
         info.setBackground(rounded(Color.WHITE, dp(16)));
