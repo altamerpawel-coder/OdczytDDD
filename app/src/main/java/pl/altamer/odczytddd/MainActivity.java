@@ -2,10 +2,12 @@ package pl.altamer.odczytddd;
 
 import android.app.Activity;
 import android.app.PendingIntent;
+import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -14,9 +16,11 @@ import android.hardware.usb.UsbManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -38,18 +42,22 @@ import pl.altamer.odczytddd.usb.UsbCcidReader;
 
 public final class MainActivity extends Activity {
     private static final String ACTION_USB_PERMISSION = "pl.altamer.odczytddd.USB_PERMISSION";
+    private static final String PREFS = "config";
+    private static final String KEY_WHATSAPP = "whatsapp_number";
+
     private static final int BLUE = Color.rgb(23, 74, 126);
     private static final int GREEN = Color.rgb(31, 122, 70);
     private static final int RED = Color.rgb(176, 45, 45);
     private static final int TEXT = Color.rgb(31, 41, 55);
 
     private UsbManager usbManager;
+    private SharedPreferences prefs;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     private TextView statusText;
     private TextView detailText;
     private Button readButton;
-    private Button shareButton;
+    private Button resendButton;
     private File latestFile;
     private boolean busy;
 
@@ -64,7 +72,7 @@ public final class MainActivity extends Activity {
                     startRead(device);
                 } else {
                     setBusy(false);
-                    showError("Brak zgody na czytnik USB", "Naciśnij ODCZYTAJ KARTĘ i zaakceptuj zgodę.");
+                    showError("Brak zgody na czytnik USB", "Naciśnij ODCZYTAJ I WYŚLIJ i zaakceptuj zgodę.");
                 }
             } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)
                     || UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
@@ -77,9 +85,14 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
-        setContentView(buildUi());
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         registerUsbReceiver();
-        refreshReaderStatus();
+        if (whatsappNumber().isEmpty()) {
+            setContentView(buildSetupUi());
+        } else {
+            setContentView(buildMainUi());
+            refreshReaderStatus();
+        }
     }
 
     @Override
@@ -92,7 +105,71 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    private View buildUi() {
+    private String whatsappNumber() {
+        return prefs.getString(KEY_WHATSAPP, "").trim();
+    }
+
+    // --- Ekran ustawień (pierwsze uruchomienie / zmiana numeru) ---
+
+    private View buildSetupUi() {
+        statusText = null;
+        detailText = null;
+        readButton = null;
+        resendButton = null;
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(Color.rgb(245, 247, 250));
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.setPadding(dp(18), dp(28), dp(18), dp(24));
+        scroll.addView(root, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT,
+                ScrollView.LayoutParams.WRAP_CONTENT));
+
+        TextView title = text("USTAW WYSYŁKĘ", 26, Typeface.BOLD, BLUE);
+        title.setGravity(Gravity.CENTER);
+        root.addView(title, matchWrap(dp(14)));
+
+        TextView info = text(
+                "Podaj numer WhatsApp, na który mają trafiać odczytane pliki karty."
+                        + "\n\nWpisz z numerem kierunkowym, np. +48691567305.",
+                18, Typeface.NORMAL, TEXT);
+        info.setPadding(dp(18), dp(18), dp(18), dp(18));
+        info.setBackground(rounded(Color.WHITE, dp(16)));
+        root.addView(info, matchWrap(dp(18)));
+
+        final EditText input = new EditText(this);
+        input.setHint("+48...");
+        input.setTextSize(22);
+        input.setInputType(InputType.TYPE_CLASS_PHONE);
+        input.setText(whatsappNumber());
+        input.setPadding(dp(16), dp(16), dp(16), dp(16));
+        input.setBackground(rounded(Color.WHITE, dp(14)));
+        root.addView(input, matchWrap(dp(18)));
+
+        Button save = bigButton("ZAPISZ", GREEN);
+        save.setOnClickListener(v -> {
+            String number = input.getText().toString().trim();
+            String digits = number.replaceAll("[^0-9]", "");
+            if (digits.length() < 6) {
+                Toast.makeText(this, "Podaj poprawny numer telefonu", Toast.LENGTH_LONG).show();
+                return;
+            }
+            prefs.edit().putString(KEY_WHATSAPP, number).apply();
+            setContentView(buildMainUi());
+            refreshReaderStatus();
+        });
+        root.addView(save, fixedHeight(dp(82), dp(8)));
+
+        return scroll;
+    }
+
+    // --- Ekran główny (jeden przycisk: odczytaj i wyślij) ---
+
+    private View buildMainUi() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(Color.rgb(245, 247, 250));
@@ -103,48 +180,62 @@ public final class MainActivity extends Activity {
         root.setPadding(dp(18), dp(22), dp(18), dp(24));
         scroll.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT,
-                ScrollView.LayoutParams.WRAP_CONTENT
-        ));
+                ScrollView.LayoutParams.WRAP_CONTENT));
 
-        TextView title = text("ODCZYT KARTY KIEROWCY", 26, Typeface.BOLD, BLUE);
+        TextView title = text("ODCZYT KARTY KIEROWCY", 24, Typeface.BOLD, BLUE);
         title.setGravity(Gravity.CENTER);
         root.addView(title, matchWrap(dp(8)));
 
         TextView steps = text(
                 "1. Podłącz czytnik USB-C\n\n"
                         + "2. Włóż kartę kierowcy\n\n"
-                        + "3. Naciśnij przycisk poniżej",
-                21, Typeface.BOLD, TEXT
-        );
+                        + "3. Naciśnij ODCZYTAJ I WYŚLIJ",
+                20, Typeface.BOLD, TEXT);
         steps.setGravity(Gravity.START);
         steps.setPadding(dp(20), dp(20), dp(20), dp(20));
         steps.setBackground(rounded(Color.WHITE, dp(16)));
-        root.addView(steps, matchWrap(dp(18)));
+        root.addView(steps, matchWrap(dp(14)));
 
-        statusText = text("Sprawdzam czytnik…", 24, Typeface.BOLD, TEXT);
+        TextView target = text(
+                "WYSYŁANIE DO: WhatsApp\n" + whatsappNumber(),
+                18, Typeface.BOLD, GREEN);
+        target.setGravity(Gravity.CENTER);
+        target.setPadding(dp(14), dp(12), dp(14), dp(12));
+        target.setBackground(rounded(Color.rgb(233, 240, 247), dp(14)));
+        root.addView(target, matchWrap(dp(6)));
+
+        Button change = new Button(this);
+        change.setText("Zmień numer");
+        change.setTextSize(16);
+        change.setAllCaps(false);
+        change.setTextColor(BLUE);
+        change.setBackgroundColor(Color.TRANSPARENT);
+        change.setOnClickListener(v -> setContentView(buildSetupUi()));
+        root.addView(change, matchWrap(dp(10)));
+
+        statusText = text("Sprawdzam czytnik…", 22, Typeface.BOLD, TEXT);
         statusText.setGravity(Gravity.CENTER);
         root.addView(statusText, matchWrap(dp(6)));
 
         detailText = text("", 17, Typeface.NORMAL, Color.DKGRAY);
         detailText.setGravity(Gravity.CENTER);
-        root.addView(detailText, matchWrap(dp(18)));
+        root.addView(detailText, matchWrap(dp(16)));
 
-        readButton = bigButton("ODCZYTAJ KARTĘ", BLUE);
+        readButton = bigButton("ODCZYTAJ I WYŚLIJ", BLUE);
         readButton.setOnClickListener(v -> onReadClicked());
-        root.addView(readButton, fixedHeight(dp(82), dp(14)));
+        root.addView(readButton, fixedHeight(dp(88), dp(12)));
 
-        shareButton = bigButton("WYŚLIJ PLIK DDD", GREEN);
-        shareButton.setEnabled(false);
-        shareButton.setAlpha(0.45f);
-        shareButton.setOnClickListener(v -> shareLatestFile());
-        root.addView(shareButton, fixedHeight(dp(82), dp(18)));
-
-        TextView footer = text(
-                "Po odczycie wybierzesz, gdzie wysłać plik: e-mail, WhatsApp, Dysk itp.",
-                16, Typeface.NORMAL, Color.DKGRAY
-        );
-        footer.setGravity(Gravity.CENTER);
-        root.addView(footer, matchWrap(0));
+        resendButton = bigButton("WYŚLIJ PONOWNIE", GREEN);
+        resendButton.setEnabled(false);
+        resendButton.setAlpha(0.45f);
+        resendButton.setOnClickListener(v -> {
+            if (latestFile != null && latestFile.isFile()) {
+                sendToWhatsApp(latestFile);
+            } else {
+                Toast.makeText(this, "Najpierw odczytaj kartę", Toast.LENGTH_LONG).show();
+            }
+        });
+        root.addView(resendButton, fixedHeight(dp(72), dp(4)));
 
         return scroll;
     }
@@ -160,8 +251,10 @@ public final class MainActivity extends Activity {
         }
 
         latestFile = null;
-        shareButton.setEnabled(false);
-        shareButton.setAlpha(0.45f);
+        if (resendButton != null) {
+            resendButton.setEnabled(false);
+            resendButton.setAlpha(0.45f);
+        }
 
         if (!usbManager.hasPermission(device)) {
             setBusy(true);
@@ -171,11 +264,9 @@ public final class MainActivity extends Activity {
                 pendingFlags |= PendingIntent.FLAG_MUTABLE;
             }
             PendingIntent permissionIntent = PendingIntent.getBroadcast(
-                    this,
-                    0,
+                    this, 0,
                     new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()),
-                    pendingFlags
-            );
+                    pendingFlags);
             usbManager.requestPermission(device, permissionIntent);
             return;
         }
@@ -184,7 +275,7 @@ public final class MainActivity extends Activity {
 
     private void startRead(UsbDevice device) {
         setBusy(true);
-        showStatus("Odczytuję kartę…", "Nie wyjmuj karty ani czytnika.", BLUE);
+        showStatus("Odczytuję kartę…", "Nie wyjmuj karty ani czytnika. Duże pliki chwilę trwają.", BLUE);
 
         executor.execute(() -> {
             try (CcidSession session = UsbCcidReader.open(usbManager, device)) {
@@ -206,23 +297,51 @@ public final class MainActivity extends Activity {
     private void onReadSuccess(
             File file,
             TachographCardDownloader.DownloadResult result,
-            boolean lastDownloadUpdated
-    ) {
+            boolean lastDownloadUpdated) {
         latestFile = file;
         setBusy(false);
-        shareButton.setEnabled(true);
-        shareButton.setAlpha(1f);
+        if (resendButton != null) {
+            resendButton.setEnabled(true);
+            resendButton.setAlpha(1f);
+        }
 
         String gen = generationLabel(result.generations());
         if (lastDownloadUpdated) {
-            showStatus("GOTOWE ✓", "Plik DDD zapisany. Karta: " + gen + "\nNaciśnij WYŚLIJ PLIK DDD.", GREEN);
+            showStatus("GOTOWE ✓", "Karta: " + gen + ". Otwieram WhatsApp…", GREEN);
         } else {
-            showStatus(
-                    "PLIK ZAPISANY ✓",
-                    "Karta: " + gen + "\nUwaga: karta nie potwierdziła zapisu daty ostatniego odczytu.\nMożesz wysłać plik DDD.",
-                    Color.rgb(176, 110, 20)
-            );
+            showStatus("PLIK ZAPISANY ✓",
+                    "Karta: " + gen + ".\nUwaga: karta nie potwierdziła zapisu daty odczytu.\nOtwieram WhatsApp…",
+                    Color.rgb(176, 110, 20));
         }
+        sendToWhatsApp(file);
+    }
+
+    private void sendToWhatsApp(File file) {
+        Uri uri = ShareFileProvider.uriForFile(getPackageName() + ".files", file);
+        Intent base = new Intent(Intent.ACTION_SEND);
+        base.setType("application/octet-stream");
+        base.putExtra(Intent.EXTRA_STREAM, uri);
+        base.putExtra(Intent.EXTRA_SUBJECT, "Plik DDD karty kierowcy");
+        base.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+        String digits = whatsappNumber().replaceAll("[^0-9]", "");
+        String[] packages = {"com.whatsapp", "com.whatsapp.w4b"};
+        for (String pkg : packages) {
+            try {
+                Intent wa = new Intent(base);
+                wa.setPackage(pkg);
+                if (!digits.isEmpty()) {
+                    wa.putExtra("jid", digits + "@s.whatsapp.net");
+                }
+                startActivity(wa);
+                return;
+            } catch (ActivityNotFoundException ignored) {
+            }
+        }
+        // WhatsApp niedostępny — pokaż systemowe okno udostępniania.
+        startActivity(Intent.createChooser(base, "Wyślij plik DDD"));
+        Toast.makeText(this, "Nie znaleziono WhatsApp — wybierz aplikację do wysyłki",
+                Toast.LENGTH_LONG).show();
     }
 
     private File saveDdd(byte[] data) throws Exception {
@@ -241,8 +360,6 @@ public final class MainActivity extends Activity {
     /**
      * Standardowa nazwa pliku pobrania karty kierowcy:
      * C_RRRRMMDD_GGMM_&lt;inicjał imienia&gt;_&lt;Nazwisko&gt;_&lt;numer karty 14 znaków&gt;.DDD
-     * Imię, nazwisko i numer pobierane z EF Identification (0520). W razie
-     * jakiegokolwiek problemu — nazwa awaryjna z datą i godziną.
      */
     private String buildDddFileName(byte[] ddd) {
         String dateTime = new SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(new Date());
@@ -266,7 +383,6 @@ public final class MainActivity extends Activity {
         return "KARTA_" + dateTime + ".DDD";
     }
 
-    /** Wartość pierwszego bloku DANE (typ 0) o danym FID (format DDD: FID2 + typ1 + długość2 + wartość). */
     private static byte[] findDddBlock(byte[] d, int wantedFid) {
         int p = 0;
         while (p + 5 <= d.length) {
@@ -286,29 +402,15 @@ public final class MainActivity extends Activity {
         return null;
     }
 
-    private void shareLatestFile() {
-        if (latestFile == null || !latestFile.isFile()) {
-            Toast.makeText(this, "Najpierw odczytaj kartę", Toast.LENGTH_LONG).show();
-            return;
-        }
-        Uri uri = ShareFileProvider.uriForFile(getPackageName() + ".files", latestFile);
-        Intent send = new Intent(Intent.ACTION_SEND);
-        send.setType("application/octet-stream");
-        send.putExtra(Intent.EXTRA_STREAM, uri);
-        send.putExtra(Intent.EXTRA_SUBJECT, "Plik DDD karty kierowcy");
-        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        startActivity(Intent.createChooser(send, "Wyślij plik DDD"));
-    }
-
     private void refreshReaderStatus() {
-        if (busy) {
+        if (statusText == null || busy) {
             return;
         }
         UsbDevice device = UsbCcidReader.findCompatibleDevice(usbManager);
         if (device == null) {
             showStatus("Czytnik niepodłączony", "Podłącz czytnik USB-C.", RED);
         } else {
-            showStatus("Czytnik podłączony ✓", "Włóż kartę i naciśnij ODCZYTAJ KARTĘ.", GREEN);
+            showStatus("Czytnik podłączony ✓", "Włóż kartę i naciśnij ODCZYTAJ I WYŚLIJ.", GREEN);
         }
     }
 
@@ -334,8 +436,10 @@ public final class MainActivity extends Activity {
 
     private void setBusy(boolean value) {
         busy = value;
-        readButton.setEnabled(!value);
-        readButton.setAlpha(value ? 0.55f : 1f);
+        if (readButton != null) {
+            readButton.setEnabled(!value);
+            readButton.setAlpha(value ? 0.55f : 1f);
+        }
     }
 
     private void showError(String title, String detail) {
@@ -343,6 +447,9 @@ public final class MainActivity extends Activity {
     }
 
     private void showStatus(String title, String detail, int color) {
+        if (statusText == null) {
+            return;
+        }
         statusText.setText(title);
         statusText.setTextColor(color);
         detailText.setText(detail);
@@ -403,8 +510,7 @@ public final class MainActivity extends Activity {
     private LinearLayout.LayoutParams matchWrap(int bottomMargin) {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
+                LinearLayout.LayoutParams.WRAP_CONTENT);
         params.bottomMargin = bottomMargin;
         return params;
     }
@@ -412,8 +518,7 @@ public final class MainActivity extends Activity {
     private LinearLayout.LayoutParams fixedHeight(int height, int bottomMargin) {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                height
-        );
+                height);
         params.bottomMargin = bottomMargin;
         return params;
     }
