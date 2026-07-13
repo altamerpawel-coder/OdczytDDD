@@ -21,7 +21,6 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.ScrollView;
@@ -182,14 +181,17 @@ public final class MainActivity extends Activity {
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT));
 
-        FrameLayout header = new FrameLayout(this);
-        TextView title = text("ODCZYT KARTY KIEROWCY", 24, Typeface.BOLD, BLUE);
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+
+        View leftSpacer = new View(this);
+        header.addView(leftSpacer, new LinearLayout.LayoutParams(dp(52), dp(1)));
+
+        TextView title = text("ODCZYT KARTY KIEROWCY", 22, Typeface.BOLD, BLUE);
         title.setGravity(Gravity.CENTER);
-        FrameLayout.LayoutParams titleParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT);
-        titleParams.gravity = Gravity.CENTER;
-        header.addView(title, titleParams);
+        header.addView(title, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         Button menu = new Button(this);
         menu.setText("⋮");
@@ -197,11 +199,10 @@ public final class MainActivity extends Activity {
         menu.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         menu.setTextColor(BLUE);
         menu.setBackground(rounded(Color.WHITE, dp(12)));
-        menu.setPadding(dp(6), dp(2), dp(6), dp(2));
-        FrameLayout.LayoutParams menuParams = new FrameLayout.LayoutParams(dp(52), dp(52));
-        menuParams.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
+        menu.setPadding(0, 0, 0, 0);
         menu.setOnClickListener(this::showOverflowMenu);
-        header.addView(menu, menuParams);
+        header.addView(menu, new LinearLayout.LayoutParams(dp(52), dp(52)));
+
         root.addView(header, matchWrap(dp(10)));
 
         TextView steps = text(
